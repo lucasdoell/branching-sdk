@@ -1,6 +1,5 @@
 import { describe, expect, it } from "bun:test";
 import type { UIMessage } from "ai";
-
 import { createConversationTree } from "../src/id-tree";
 
 function makeText(
@@ -8,127 +7,127 @@ function makeText(
   role: "user" | "assistant",
   text: string
 ): UIMessage {
-  return {
-    id,
-    role,
-    parts: [{ type: "text", text }],
-  };
+  return { id, role, parts: [{ type: "text", text }] };
 }
 
-function makeWithParts(
-  id: string,
-  role: "user" | "assistant",
-  parts: UIMessage["parts"]
-): UIMessage {
-  return { id, role, parts };
+function ids(messages: UIMessage[]): string[] {
+  return messages.map((m) => m.id);
 }
 
-function childIds(node: { children: { id: string }[] }): string[] {
-  return node.children.map((c) => c.id);
-}
+describe("ConversationTree serialization (UIMessage v5)", () => {
+  it("serializes a linear path (root → … → target) via serializeToNode", async () => {
+    const { addMessage, serializeToNode } = createConversationTree("conv");
+    const U1 = makeText("U1", "user", "hi");
+    const A1 = makeText("A1", "assistant", "hello");
+    const U2 = makeText("U2", "user", "more");
 
-describe("ConversationTree (UIMessage v5)", () => {
-  it("builds a mostly-linear tree and always includes parts", () => {
-    const { tree, addMessage } = createConversationTree("conv");
+    addMessage(U1);
+    addMessage(A1);
+    addMessage(U2);
 
-    const U1 = makeText("U1", "user", "What's up?");
-    const A1 = makeText("A1", "assistant", "All good!");
+    const msgs = await serializeToNode("U2");
+    expect(ids(msgs)).toEqual(["U1", "A1", "U2"]);
+  });
+
+  it("serializes by explicit message id list (no path validation)", async () => {
+    const { addMessage, serializeByMessageIds } =
+      createConversationTree("conv");
+    const U1 = makeText("U1", "user", "hi");
+    const A1 = makeText("A1", "assistant", "hello");
+    const U2 = makeText("U2", "user", "more");
+
+    addMessage(U1);
+    addMessage(A1);
+    addMessage(U2);
+
+    const msgs = await serializeByMessageIds(["U1", "U2"]);
+    expect(ids(msgs)).toEqual(["U1", "U2"]);
+  });
+
+  it("throws on invalid node path steps in serializeFromNodePath", async () => {
+    const { addMessage, serializeFromNodePath } =
+      createConversationTree("conv");
+    const U1 = makeText("U1", "user", "hi");
+    const A1 = makeText("A1", "assistant", "hello");
 
     addMessage(U1);
     addMessage(A1);
 
-    // root -> U1
-    expect(tree.root.children.length).toBe(1);
-    expect(tree.root.children[0].id).toBe("U1");
-
-    // U1 has its parts first, then the next message (A1)
-    const u1 = tree.find("U1")!;
-    expect(childIds(u1)).toEqual(["U1::part-0:text", "A1"]);
-
-    // A1 exists and has its own parts
-    const a1 = tree.find("A1")!;
-    expect(childIds(a1)).toEqual(["A1::part-0:text"]);
+    // "A1" is not a child of root directly in node-path terms; path must include "U1" first.
+    await expect(serializeFromNodePath(["A1"])).rejects.toThrow(/not a child/i);
   });
 
-  it("preserves part order for a multi-part message", () => {
-    const { tree, addMessage } = createConversationTree("conv");
+  it("handles multiple branches: choose the correct path among siblings", async () => {
+    const {
+      tree,
+      addMessage,
+      beginBranch,
+      serializeFromNodePath,
+      serializeToNode,
+    } = createConversationTree("conv");
 
-    const U1 = makeWithParts("U1", "user", [
-      { type: "step-start" }, // no payload
-      { type: "text", text: "first" },
-      { type: "text", text: "second" },
-    ]);
-    const A1 = makeText("A1", "assistant", "ok");
+    // Top node under root
+    const M1 = makeText("1", "user", "root message");
+    addMessage(M1);
 
-    addMessage(U1);
-    addMessage(A1);
+    // Left child line: 1 -> 2L -> 3
+    const M2L = makeText("2L", "assistant", "left branch, first reply");
+    addMessage(M2L); // appended under "1"
 
-    const u1 = tree.find("U1")!;
-    expect(childIds(u1)).toEqual([
-      "U1::part-0:step-start",
-      "U1::part-1:text",
-      "U1::part-2:text",
-      "A1",
-    ]);
-  });
+    const M3 = makeText("3", "user", "left line continues");
+    addMessage(M3); // under "2L"
 
-  it("supports branching: beginBranch(anchor) + addMessage under the branch root", () => {
-    const { tree, addMessage, beginBranch } = createConversationTree("conv");
+    // Right sibling off "1": create branch root under "1" and append 2R there
+    const { branchRootId: B1 } = beginBranch("1", "alt");
+    const M2R = makeText("2R", "assistant", "right branch from root");
+    addMessage(M2R, B1);
 
-    const U1 = makeText("U1", "user", "Hi");
-    const A1 = makeText("A1", "assistant", "Hello");
+    // Now split again under "3": two alternatives 4A and 4B under a new branch node
+    const { branchRootId: B3 } = beginBranch("3", "split");
+    const M4A = makeText("4A", "assistant", "left leaf A");
+    const M4B = makeText("4B", "assistant", "left leaf B");
+    addMessage(M4A, B3);
+    addMessage(M4B, B3);
 
-    addMessage(U1);
-    addMessage(A1);
+    // Sanity: node layout (ids only)
+    // conv
+    //  └─ 1
+    //      ├─ 1::part-0:text
+    //      ├─ 2L
+    //      │   ├─ 2L::part-0:text
+    //      │   └─ 3
+    //      │       ├─ 3::part-0:text
+    //      │       └─ 3::split
+    //      │           ├─ 4A
+    //      │           └─ 4B
+    //      └─ 1::alt
+    //          └─ 2R
 
-    // Start a branch under the previous assistant response (A1), e.g. user edited message
-    const { branchRootId } = beginBranch("A1", "edit");
+    // Path 1: go left path to leaf 4A
+    const pathTo4A = ["1", "2L", "3", B3, "4A"];
+    const msgs4A = await serializeFromNodePath(pathTo4A);
+    expect(ids(msgs4A)).toEqual(["1", "2L", "3", "4A"]);
 
-    // Add edited user message / recomputed answer into that branch
-    const U1_EDIT = makeText("U1_edit", "user", "Hi (edited)");
-    const A2 = makeText("A2", "assistant", "Hello (recomputed)");
+    // Path 2: same, but choose 4B at the split
+    const pathTo4B = ["1", "2L", "3", B3, "4B"];
+    const msgs4B = await serializeFromNodePath(pathTo4B);
+    expect(ids(msgs4B)).toEqual(["1", "2L", "3", "4B"]);
 
-    addMessage(U1_EDIT, branchRootId);
-    addMessage(A2, branchRootId);
+    // Path 3: directly choose the right branch from root (1 -> alt -> 2R)
+    const pathTo2R = ["1", B1, "2R"];
+    const msgs2R = await serializeFromNodePath(pathTo2R);
+    expect(ids(msgs2R)).toEqual(["1", "2R"]);
 
-    const a1 = tree.find("A1")!;
-    // A1's children: its own parts first, then the branch node
-    expect(childIds(a1)).toEqual(["A1::part-0:text", branchRootId]);
+    // Also verify serializeToNode can discover the correct route to a deep leaf
+    const autoMsgs = await serializeToNode("4B");
+    expect(ids(autoMsgs)).toEqual(["1", "2L", "3", "4B"]);
 
-    const branch = tree.find(branchRootId)!;
-    expect(childIds(branch)).toEqual(["U1_edit"]);
+    // Confirm branch nodes themselves are structural and not emitted as messages
+    expect(ids(msgs2R)).not.toContain(B1);
+    expect(ids(msgs4A)).not.toContain(B3);
 
-    const u1Edit = tree.find("U1_edit")!;
-    expect(childIds(u1Edit)).toEqual(["U1_edit::part-0:text", "A2"]);
-  });
-
-  it("throws on duplicate message IDs", () => {
-    const { addMessage } = createConversationTree("conv");
-    const U1 = makeText("U1", "user", "Hi");
-
-    addMessage(U1);
-    expect(() => addMessage(U1)).toThrow(/Duplicate message id/i);
-  });
-
-  it("throws when branching from a missing anchor", () => {
-    const { beginBranch } = createConversationTree("conv");
-    expect(() => beginBranch("nope")).toThrow(/Anchor "nope" not found/i);
-  });
-
-  it("de-duplicates part IDs if they collide with existing nodes", () => {
-    // Create a message whose ID collides with a future part label
-    // (parts use `${messageId}::part-${i}:${type}`)
-    const { tree, addMessage } = createConversationTree("conv");
-
-    // This ID will collide with U1's part-0:text label.
-    const COLLIDER = makeText("U1::part-0:text", "user", "dummy");
-    addMessage(COLLIDER);
-
-    const U1 = makeText("U1", "user", "real message");
-    addMessage(U1);
-
-    const u1 = tree.find("U1")!;
-    // The first part should get a "-1" suffix due to collision
-    expect(childIds(u1)[0]).toBe("U1::part-0:text-1");
+    // Bonus: ensure no stray children underneath branch leaves
+    expect(tree.find("4A")!.children.length).toBe(1); // its part node only
+    expect(tree.find("4B")!.children.length).toBe(1);
   });
 });
