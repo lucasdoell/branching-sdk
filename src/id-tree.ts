@@ -1,58 +1,87 @@
-// A single node in the ID tree.
 export interface IdNode {
-  readonly id: string; // id is immutable from the outside
+  readonly id: string;
   children: IdNode[]; // order matters
 }
 
-/**
- * Ordered ID tree with guaranteed-unique IDs and pre-order DFS traversal.
- * - O(1) `find` using an internal index
- * - Appends preserve child order (push)
- * - Early-exit traversal
- */
 export class IdTree {
   private _root: IdNode;
   private readonly index: Map<string, IdNode>;
 
   constructor(rootId: string) {
-    const root = { id: rootId, children: [] } as IdNode;
+    const root: IdNode = { id: rootId, children: [] };
     this._root = root;
-    this.index = new Map<string, IdNode>([[rootId, root]]);
+    this.index = new Map([[rootId, root]]);
   }
 
   get root(): IdNode {
     return this._root;
   }
 
-  /**
-   * O(1) lookup by id. Returns null if not found.
-   */
+  has(id: string): boolean {
+    return this.index.has(id);
+  }
+
   find(id: string): IdNode | null {
     return this.index.get(id) ?? null;
   }
 
   /**
-   * Append a new child under `parentId`. Enforces unique `childId`.
-   * Returns the newly created node.
+   * Append a new child under `parentId` (enforces unique childId).
+   * Returns the new node.
    */
   appendChild(parentId: string, childId: string): IdNode {
     const parent = this.index.get(parentId);
-    if (!parent) {
-      throw new Error(`Parent with id "${parentId}" not found.`);
-    }
-    if (this.index.has(childId)) {
-      throw new Error(`A node with id "${childId}" already exists.`);
-    }
+    if (!parent) throw new Error(`Parent "${parentId}" not found.`);
 
-    const child = { id: childId, children: [] } as IdNode;
+    if (this.index.has(childId)) throw new Error(`Duplicate id "${childId}".`);
+
+    const child: IdNode = { id: childId, children: [] };
     parent.children.push(child);
     this.index.set(childId, child);
+
     return child;
   }
 
   /**
-   * Visit each node in pre-order DFS. Return `false` from `visit` to stop early.
+   * Insert a node (that already exists) under a new parent at the end.
+   * Useful if you implement move/branch rewiring later.
    */
+  reparent(nodeId: string, newParentId: string): void {
+    if (nodeId === this._root.id) throw new Error("Cannot reparent root.");
+    const node = this.index.get(nodeId);
+    const newParent = this.index.get(newParentId);
+    if (!node) throw new Error(`Node "${nodeId}" not found.`);
+    if (!newParent) throw new Error(`Parent "${newParentId}" not found.`);
+
+    // Find and remove from old parent's children
+    const oldParent = this.findParent(nodeId);
+    if (!oldParent) throw new Error(`Parent of "${nodeId}" not found.`);
+    const i = oldParent.children.findIndex((c) => c.id === nodeId);
+    if (i >= 0) oldParent.children.splice(i, 1);
+
+    // Append to new parent (order-preserving)
+    newParent.children.push(node);
+  }
+
+  /**
+   * Find the parent node (O(n)). Acceptable for tree ops; if needed, keep a parent index.
+   */
+  findParent(id: string): IdNode | null {
+    if (!this.index.has(id) || id === this._root.id) return null;
+
+    // Iterative DFS to locate the parent
+    const stack: IdNode[] = [this._root];
+    while (stack.length) {
+      const cur = stack.pop()!;
+      for (const child of cur.children) {
+        if (child.id === id) return cur;
+        stack.push(child);
+      }
+    }
+
+    return null;
+  }
+
   traverseDepthFirst(
     visit: (
       node: IdNode,
@@ -70,7 +99,7 @@ export class IdTree {
       { node: this._root, depth: 0, parent: null, i: -1 },
     ];
 
-    while (stack.length > 0) {
+    while (stack.length) {
       const top = stack[stack.length - 1];
 
       if (top.i === -1) {
@@ -85,6 +114,7 @@ export class IdTree {
       }
 
       const child = top.node.children[top.i++];
+
       stack.push({
         node: child,
         depth: top.depth + 1,
@@ -94,23 +124,11 @@ export class IdTree {
     }
   }
 
-  /**
-   * Convenience: does a node with this id exist?
-   */
-  has(id: string): boolean {
-    return this.index.has(id);
-  }
-
-  /**
-   * JSON-safe deep copy (avoids exposing internal references).
-   */
   toJSON(): IdNode {
-    function clone(node: IdNode): IdNode {
-      return {
-        id: node.id,
-        children: node.children.map(clone),
-      };
+    function clone(n: IdNode): IdNode {
+      return { id: n.id, children: n.children.map(clone) };
     }
+
     return clone(this._root);
   }
 }
