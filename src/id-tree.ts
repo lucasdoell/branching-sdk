@@ -1,16 +1,18 @@
+import type { UIMessage } from "ai";
+
 export interface IdNode {
   readonly id: string;
-  children: IdNode[]; // order matters
+  children: IdNode[];
 }
 
 export class IdTree {
   private _root: IdNode;
-  private readonly index: Map<string, IdNode>;
+  private readonly index = new Map<string, IdNode>();
 
   constructor(rootId: string) {
     const root: IdNode = { id: rootId, children: [] };
     this._root = root;
-    this.index = new Map([[rootId, root]]);
+    this.index.set(rootId, root);
   }
 
   get root(): IdNode {
@@ -25,110 +27,102 @@ export class IdTree {
     return this.index.get(id) ?? null;
   }
 
-  /**
-   * Append a new child under `parentId` (enforces unique childId).
-   * Returns the new node.
-   */
   appendChild(parentId: string, childId: string): IdNode {
     const parent = this.index.get(parentId);
     if (!parent) throw new Error(`Parent "${parentId}" not found.`);
-
     if (this.index.has(childId)) throw new Error(`Duplicate id "${childId}".`);
-
     const child: IdNode = { id: childId, children: [] };
     parent.children.push(child);
     this.index.set(childId, child);
-
     return child;
   }
 
-  /**
-   * Insert a node (that already exists) under a new parent at the end.
-   * Useful if you implement move/branch rewiring later.
-   */
-  reparent(nodeId: string, newParentId: string): void {
-    if (nodeId === this._root.id) throw new Error("Cannot reparent root.");
-    const node = this.index.get(nodeId);
-    const newParent = this.index.get(newParentId);
-    if (!node) throw new Error(`Node "${nodeId}" not found.`);
-    if (!newParent) throw new Error(`Parent "${newParentId}" not found.`);
-
-    // Find and remove from old parent's children
-    const oldParent = this.findParent(nodeId);
-    if (!oldParent) throw new Error(`Parent of "${nodeId}" not found.`);
-    const i = oldParent.children.findIndex((c) => c.id === nodeId);
-    if (i >= 0) oldParent.children.splice(i, 1);
-
-    // Append to new parent (order-preserving)
-    newParent.children.push(node);
-  }
-
-  /**
-   * Find the parent node (O(n)). Acceptable for tree ops; if needed, keep a parent index.
-   */
-  findParent(id: string): IdNode | null {
-    if (!this.index.has(id) || id === this._root.id) return null;
-
-    // Iterative DFS to locate the parent
-    const stack: IdNode[] = [this._root];
-    while (stack.length) {
-      const cur = stack.pop()!;
-      for (const child of cur.children) {
-        if (child.id === id) return cur;
-        stack.push(child);
-      }
-    }
-
-    return null;
-  }
-
-  traverseDepthFirst(
-    visit: (
-      node: IdNode,
-      depth: number,
-      parent: IdNode | null
-    ) => boolean | void
-  ): void {
-    type Frame = {
-      node: IdNode;
-      depth: number;
-      parent: IdNode | null;
-      i: number;
-    };
-    const stack: Frame[] = [
-      { node: this._root, depth: 0, parent: null, i: -1 },
-    ];
-
-    while (stack.length) {
-      const top = stack[stack.length - 1];
-
-      if (top.i === -1) {
-        const cont = visit(top.node, top.depth, top.parent);
-        if (cont === false) return;
-        top.i = 0;
-      }
-
-      if (top.i >= top.node.children.length) {
-        stack.pop();
-        continue;
-      }
-
-      const child = top.node.children[top.i++];
-
-      stack.push({
-        node: child,
-        depth: top.depth + 1,
-        parent: top.node,
-        i: -1,
-      });
-    }
-  }
-
   toJSON(): IdNode {
-    function clone(n: IdNode): IdNode {
-      return { id: n.id, children: n.children.map(clone) };
-    }
-
+    const clone = (n: IdNode): IdNode => ({
+      id: n.id,
+      children: n.children.map(clone),
+    });
     return clone(this._root);
   }
+}
+
+// Conversation builder (UIMessage → IdTree)
+export interface ConversationTree {
+  tree: IdTree;
+  addMessage(message: UIMessage, parentId?: string): IdNode;
+  beginBranch(anchorId: string, branchLabel?: string): { branchRootId: string };
+}
+
+export function createConversationTree(
+  rootId = "conversation"
+): ConversationTree {
+  const tree = new IdTree(rootId);
+  let lastTopLevelId = rootId;
+  let lastBranchId: string | null = null;
+
+  function nextUniqueId(base: string) {
+    if (!tree.has(base)) return base;
+    let i = 1;
+    while (tree.has(`${base}-${i}`)) i++;
+    return `${base}-${i}`;
+  }
+
+  function attachParts(parentMessageId: string, parts: UIMessage["parts"]) {
+    for (let i = 0; i < parts.length; i++) {
+      const p = parts[i];
+      const partBase = `${parentMessageId}::part-${i}:${p.type}`;
+      const partId = nextUniqueId(partBase);
+      tree.appendChild(parentMessageId, partId);
+      // If you want to persist payloads (e.g., text/tool input/output) as nodes,
+      // you can append grandchildren here based on p.type.
+    }
+  }
+
+  function addMessage(message: UIMessage, parentId?: string): IdNode {
+    if (!message?.id) throw new Error("UIMessage.id is required.");
+    if (!Array.isArray(message.parts)) {
+      throw new Error("UIMessage.parts is required in v5.");
+    }
+    if (tree.has(message.id)) {
+      throw new Error(`Duplicate message id "${message.id}" detected.`);
+    }
+
+    let resolvedParent: string;
+    if (parentId) {
+      // If parentId is provided, check if it's a branch root
+      // If so, and we have a lastBranchId, use that instead for linear chaining
+      if (lastBranchId && parentId.includes("::")) {
+        resolvedParent = lastBranchId;
+      } else {
+        resolvedParent = parentId;
+      }
+    } else {
+      resolvedParent = lastTopLevelId;
+    }
+
+    const node = tree.appendChild(resolvedParent, message.id);
+    attachParts(message.id, message.parts);
+
+    // Update tracking variables
+    if (!parentId) {
+      lastTopLevelId = message.id;
+      lastBranchId = null;
+    } else if (parentId.includes("::")) {
+      // We're adding to a branch
+      lastBranchId = message.id;
+    }
+
+    return node;
+  }
+
+  function beginBranch(anchorId: string, branchLabel = "branch") {
+    if (!tree.has(anchorId)) throw new Error(`Anchor "${anchorId}" not found.`);
+    const branchRootId = nextUniqueId(`${anchorId}::${branchLabel}`);
+    tree.appendChild(anchorId, branchRootId);
+    lastTopLevelId = branchRootId;
+    lastBranchId = null; // Reset branch tracking when starting a new branch
+    return { branchRootId };
+  }
+
+  return { tree, addMessage, beginBranch };
 }
