@@ -11,9 +11,9 @@ bun add branching-sdk
 ## Usage
 
 ```typescript
-import { greet } from 'branching-sdk';
+import { greet } from "branching-sdk";
 
-console.log(greet('World')); // Hello, World!
+console.log(greet("World")); // Hello, World!
 ```
 
 ## Contributing
